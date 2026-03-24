@@ -3,7 +3,6 @@ import { isToday, isYesterday, format, startOfDay } from "date-fns"
 
 import { searchLog } from "@/lib/logger"
 import { parseLabelEntry } from "@craft-agent/shared/labels"
-import { fuzzyScore } from "@craft-agent/shared/search"
 import { getSessionTitle, getSessionStatus } from "@/utils/session"
 import type { SessionMeta } from "@/atoms/sessions"
 import type { ViewConfig } from "@craft-agent/shared/views"
@@ -388,19 +387,29 @@ export function useSessionSearch({
       )
     }
 
-    return sortedItems
-      .filter(item => contentSearchResults.has(item.id))
-      .sort((a, b) => {
-        const aScore = fuzzyScore(getSessionTitle(a), searchQuery)
-        const bScore = fuzzyScore(getSessionTitle(b), searchQuery)
+    const normalizedQuery = searchQuery.trim().toLowerCase()
 
-        if (aScore > 0 && bScore === 0) return -1
-        if (aScore === 0 && bScore > 0) return 1
-        if (aScore !== bScore) return bScore - aScore
+    return sortedItems
+      .filter(item => {
+        const title = getSessionTitle(item).toLowerCase()
+        const hasTitleMatch = title.includes(normalizedQuery)
+        const hasContentMatch = contentSearchResults.has(item.id)
+        return hasTitleMatch || hasContentMatch
+      })
+      .sort((a, b) => {
+        const aTitle = getSessionTitle(a).toLowerCase()
+        const bTitle = getSessionTitle(b).toLowerCase()
+        const aTitleMatch = aTitle.includes(normalizedQuery)
+        const bTitleMatch = bTitle.includes(normalizedQuery)
+
+        if (aTitleMatch && !bTitleMatch) return -1
+        if (!aTitleMatch && bTitleMatch) return 1
 
         const countA = contentSearchResults.get(a.id)?.matchCount || 0
         const countB = contentSearchResults.get(b.id)?.matchCount || 0
-        return countB - countA
+        if (countA !== countB) return countB - countA
+
+        return (b.lastMessageAt || 0) - (a.lastMessageAt || 0)
       })
   }, [sortedItems, isSearchMode, searchQuery, contentSearchResults, currentFilter, evaluateViews, statusFilter, labelFilterMap])
 

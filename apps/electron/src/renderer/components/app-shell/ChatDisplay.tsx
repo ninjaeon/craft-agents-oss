@@ -71,6 +71,7 @@ import { useAppShellContext } from "@/context/AppShellContext"
 import { routes } from "@/lib/navigate"
 import { CHAT_LAYOUT } from "@/config/layout"
 import { resolveBranchNewPanelOption } from "./branching"
+import { getSearchMatchesForTurns } from "./chat-search"
 
 // ============================================================================
 // Overlay State Types
@@ -619,7 +620,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Use the external search query from props
   const searchQuery = externalSearchQuery || ''
-  const isSearchActive = Boolean(searchQuery.trim())
+  // Require 2+ characters to activate in-chat search (aligned with session list isSearchMode)
+  // Single-char matches are too numerous and would block the main thread
+  const isSearchActive = searchQuery.trim().length >= 2
 
   // Focus textarea when zone gains focus via keyboard (Tab, Cmd+3, ArrowRight)
   // Requires isFocused to be true - respects zone architecture
@@ -669,78 +672,26 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     setActualMatchIds(new Set()) // Clear stale match IDs to prevent incorrect counts
   }, [session?.id, searchQuery, isSearchActive])
 
-  // Helper to count occurrences of a substring
-  const countOccurrences = useCallback((text: string, query: string): number => {
-    const lowerText = text.toLowerCase()
-    const lowerQuery = query.toLowerCase()
-    let count = 0
-    let pos = 0
-    while ((pos = lowerText.indexOf(lowerQuery, pos)) !== -1) {
-      count++
-      pos += lowerQuery.length
-    }
-    return count
-  }, [])
-
   // Find ALL individual match occurrences (not just turns)
   // Returns array with unique matchId for each occurrence
+  // Requires 2+ character query (aligned with session list isSearchMode threshold)
+  // to avoid expensive O(turns × text_length) computation for single-char queries
   const matchingOccurrences = useMemo(() => {
-    if (!searchQuery.trim() || !session?.messages) return []
-    const startTime = performance.now()
-    const query = searchQuery.toLowerCase()
+    if (!searchQuery.trim() || searchQuery.trim().length < 2 || !session?.messages) return []
     const turns = groupMessagesByTurn(session.messages)
-    const matches: { matchId: string; turnId: string; turnIndex: number; matchIndexInTurn: number }[] = []
-
-    for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
-      const turn = turns[turnIndex]
-      let textContent = ''
-      let turnId = ''
-
-      if (turn.type === 'user') {
-        turnId = `user-${turn.message.id}`
-        // Extract text content from user message
-        const content = turn.message.content as unknown
-        if (typeof content === 'string') {
-          textContent = content
-        } else if (Array.isArray(content)) {
-          textContent = content
-            .filter((block: { type?: string }) => block.type === 'text')
-            .map((block: { text?: string }) => block.text || '')
-            .join('\n')
-        }
-      } else if (turn.type === 'assistant') {
-        turnId = `turn-${turn.turnId}`
-        // Extract text content from assistant response
-        // turn.response is { text: string, isStreaming: boolean } object
-        if (turn.response?.text) {
-          textContent = turn.response.text
-        }
-      } else if (turn.type === 'system') {
-        turnId = `system-${turn.message.id}`
-        textContent = turn.message.content
-      }
-
-      // Count occurrences in this turn's text content
-      const occurrenceCount = countOccurrences(textContent, query)
-      for (let i = 0; i < occurrenceCount; i++) {
-        matches.push({
-          matchId: `${turnId}-match-${i}`,
-          turnId,
-          turnIndex,
-          matchIndexInTurn: i,
-        })
-      }
-    }
-    return matches
-  }, [searchQuery, session?.messages, countOccurrences])
+    return getSearchMatchesForTurns(turns, searchQuery)
+  }, [searchQuery, session?.messages])
 
   // Auto-expand pagination when search is active to show all matching turns
   // This ensures match count is stable and all matches are highlightable from the start
   useEffect(() => {
     if (!isSearchActive || matchingOccurrences.length === 0) return
 
-    // Find the earliest matching turn index
-    const earliestMatchTurnIndex = Math.min(...matchingOccurrences.map(m => m.turnIndex))
+    // Use reduce instead of Math.min(...arr) to avoid RangeError on large arrays
+    const earliestMatchTurnIndex = matchingOccurrences.reduce(
+      (min, m) => m.turnIndex < min ? m.turnIndex : min,
+      matchingOccurrences[0]!.turnIndex
+    )
     const totalTurns = groupMessagesByTurn(session?.messages || []).length
 
     // Calculate how many turns we need to show to include all matches
@@ -758,13 +709,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     return Array.from(uniqueTurnIds)
   }, [matchingOccurrences])
 
-  // Filter to only valid matches that exist in DOM (actualMatchIds is updated after highlighting)
-  const validMatches = useMemo(() => {
-    // Before highlighting runs, show all potential matches
-    // After highlighting, filter to only matches that exist in DOM
-    if (actualMatchIds.size === 0) return matchingOccurrences
-    return matchingOccurrences.filter(m => actualMatchIds.has(m.matchId))
-  }, [matchingOccurrences, actualMatchIds])
+  // Navigation should be driven by logical matches, not by whether DOM mark injection succeeded.
+  // This keeps assistant search usable even when we avoid expensive DOM mutation in large markdown trees.
+  const validMatches = matchingOccurrences
 
   // Auto-scroll to match ONLY when there's exactly one match
   // Multiple matches: user navigates with chevrons to avoid jarring scroll
@@ -782,7 +729,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
     if (validMatches.length > 0 && currentMatchIndex < validMatches.length) {
       const matchData = validMatches[currentMatchIndex]
-      const { matchId, turnIndex } = matchData
+      const { turnIndex } = matchData
       const totalTurns = totalTurnCountRef.current
 
       // Calculate current visible range
@@ -797,265 +744,112 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
         return
       }
 
-      // Use multiple attempts to ensure DOM is ready (highlights are applied)
-      let attempts = 0
-      const maxAttempts = 5
-
-      const tryScroll = () => {
-        const matchEl = document.getElementById(matchId) as HTMLElement | null
-        if (matchEl) {
-          // Only scroll if match is not comfortably visible on screen (with 128px edge buffer)
-          const rect = matchEl.getBoundingClientRect()
-          const buffer = 128
-          const isVisible = rect.top >= buffer && rect.bottom <= window.innerHeight - buffer
-          if (!isVisible) {
-            matchEl.scrollIntoView({ behavior: 'instant', block: 'center' })
-          }
-          // Add active styling to current match (prominent yellow with shadow and ring)
-          // Using ring instead of border to avoid layout shift
-          matchEl.classList.remove('bg-yellow-300/30')
-          matchEl.classList.add('bg-yellow-300', 'shadow-tinted', 'text-black/90', 'ring-1', 'ring-yellow-500')
-          ;(matchEl as HTMLElement).style.setProperty('--shadow-color', '90, 50, 5') // dark amber for stronger shadow
-          // Remove active styling from other matches (revert to passive)
-          document.querySelectorAll('mark.search-highlight.bg-yellow-300').forEach(el => {
-            if (el.id !== matchId) {
-              el.classList.remove('bg-yellow-300', 'shadow-tinted', 'text-black/90', 'ring-1', 'ring-yellow-500')
-              el.classList.add('bg-yellow-300/30')
-              ;(el as HTMLElement).style.removeProperty('--shadow-color')
-            }
-          })
-          shouldScrollToMatchRef.current = false
-        } else if (attempts < maxAttempts) {
-          attempts++
-          setTimeout(tryScroll, 50)
-        } else {
-          // Give up - validMatches should only contain valid matches, but timing can cause this
-          shouldScrollToMatchRef.current = false
-        }
-      }
-
-      // Start with requestAnimationFrame for initial attempt
-      const rafId = requestAnimationFrame(tryScroll)
-      return () => cancelAnimationFrame(rafId)
+      shouldScrollToMatchRef.current = false
     }
   }, [validMatches, currentMatchIndex, session?.id, visibleTurnCount])
 
-  // Text highlighting within messages
-  // Uses DOM manipulation after render to highlight matching text
+  // ---------------------------------------------------------------------------
+  // CSS Custom Highlight API — non-destructive text highlighting
+  // Creates browser-native highlight ranges over matching text without
+  // modifying the DOM tree. Safe with React re-renders and streaming.
+  // ---------------------------------------------------------------------------
+
+  // HighlightRegistry type is incomplete in current TS lib — cast once for the effect
+  const cssHighlights = CSS.highlights as unknown as Map<string, Highlight> | undefined
+
   useEffect(() => {
-    // Clear previous highlights
-    const clearHighlights = () => {
-      const existingMarks = document.querySelectorAll('mark.search-highlight')
-      existingMarks.forEach(mark => {
-        const parent = mark.parentNode
-        if (parent) {
-          parent.replaceChild(document.createTextNode(mark.textContent || ''), mark)
-          parent.normalize() // Merge adjacent text nodes
-        }
-      })
-    }
+    // Always clear previous highlights first
+    try {
+      cssHighlights?.delete('search-passive')
+      cssHighlights?.delete('search-active')
+    } catch { /* API unavailable — no-op */ }
 
-    // Detect if search/session changed (need full clear) vs just pagination (accumulate)
-    const prevContext = prevHighlightContextRef.current
-    const contextChanged = prevContext.searchQuery !== searchQuery || prevContext.sessionId !== session?.id
-    prevHighlightContextRef.current = { searchQuery, sessionId: session?.id ?? null }
-
-    // Only clear highlights and reset state when search/session changes
-    // When just pagination changes, we accumulate new highlights
-    if (contextChanged) {
-      clearHighlights()
-      setActualMatchIds(new Set())
-      highlightedTurnIdsRef.current = new Set()
-    }
-
-    if (!searchQuery.trim() || !isSearchActive) return
+    if (!searchQuery.trim() || !isSearchActive || !cssHighlights) return
 
     const query = searchQuery.toLowerCase()
-    const createdMatchIds: string[] = [] // Collect IDs as we create marks
+    const matchingTurnIdSet = new Set(matchingTurnIds)
+    if (matchingTurnIdSet.size === 0) return
 
-    // Highlighting function - applies highlights only to MATCHING turn refs
-    // Assigns unique IDs to each mark for navigation
-    const applyHighlights = () => {
-      // Only highlight in turns that actually match, not all visible turns
-      const matchingTurnIdSet = new Set(matchingTurnIds)
-      // Track match counter per turn for unique IDs
-      const turnMatchCounters = new Map<string, number>()
+    // Collect all highlight ranges, grouped per turn so we can identify
+    // which ranges belong to the active match for differentiated styling.
+    // Cap highlight ranges to avoid memory/performance issues with broad queries
+    const MAX_HIGHLIGHT_RANGES = 5000
+    const allRanges: Range[] = []
+    // Map from global match index → Range for active-match highlighting
+    const rangeByGlobalIndex = new Map<number, Range>()
+    let globalIndex = 0
 
-      turnRefs.current.forEach((container, turnId) => {
-        // Skip turns that don't contain matches
-        if (!matchingTurnIdSet.has(turnId)) return
+    // Use requestAnimationFrame to ensure DOM is rendered before walking
+    const rafId = requestAnimationFrame(() => {
+      turnRefs.current.forEach((container, turnKey) => {
+        if (allRanges.length >= MAX_HIGHLIGHT_RANGES) return // cap reached
+        if (!matchingTurnIdSet.has(turnKey)) return
 
-        // Skip turns that have already been highlighted (pagination case)
-        if (highlightedTurnIdsRef.current.has(turnId)) return
+        // For assistant turns, narrow search to the response content root
+        // to avoid highlighting inside tool activity/metadata areas
+        const searchRoot = container.querySelector('[data-search-root="response"]') || container
 
-        // Mark this turn as highlighted
-        highlightedTurnIdsRef.current.add(turnId)
-
-        // Initialize counter for this turn
-        turnMatchCounters.set(turnId, 0)
-
-        // Find all text nodes within the container
         const walker = document.createTreeWalker(
-          container,
+          searchRoot,
           NodeFilter.SHOW_TEXT,
           {
             acceptNode: (node) => {
-              // Skip nodes in script, style, or already marked
               const parent = node.parentElement
               if (!parent) return NodeFilter.FILTER_REJECT
-              const tagName = parent.tagName.toLowerCase()
-              if (tagName === 'script' || tagName === 'style' || tagName === 'mark') {
-                return NodeFilter.FILTER_REJECT
-              }
-              // Skip nodes within elements marked as search-excluded (e.g., tool activities)
-              // This matches ripgrep behavior which only searches user/assistant text
-              if (parent.closest('[data-search-exclude="true"]')) {
-                return NodeFilter.FILTER_REJECT
-              }
-              // Only process nodes that contain the search text
-              if (node.textContent?.toLowerCase().includes(query)) {
-                return NodeFilter.FILTER_ACCEPT
-              }
-              return NodeFilter.FILTER_REJECT
-            }
+              const tag = parent.tagName.toLowerCase()
+              if (tag === 'script' || tag === 'style') return NodeFilter.FILTER_REJECT
+              // Skip tool activity regions (matches backend search scope)
+              if (parent.closest('[data-search-exclude="true"]')) return NodeFilter.FILTER_REJECT
+              if (node.textContent?.toLowerCase().includes(query)) return NodeFilter.FILTER_ACCEPT
+              return NodeFilter.FILTER_SKIP
+            },
           }
         )
 
-        const textNodes: Text[] = []
-        let currentNode: Node | null
-        while ((currentNode = walker.nextNode())) {
-          textNodes.push(currentNode as Text)
-        }
-
-        // Process text nodes in FORWARD order to assign IDs correctly
-        // (but we need to be careful about DOM manipulation)
-        // Actually, let's collect all matches first, then apply
-        const allMatches: { textNode: Text; start: number; end: number }[] = []
-        for (const textNode of textNodes) {
+        let textNode: Node | null
+        while ((textNode = walker.nextNode())) {
+          if (allRanges.length >= MAX_HIGHLIGHT_RANGES) break
           const text = textNode.textContent || ''
           const lowerText = text.toLowerCase()
           let pos = 0
-          let matchPos = lowerText.indexOf(query, pos)
-          while (matchPos !== -1) {
-            allMatches.push({ textNode, start: matchPos, end: matchPos + query.length })
-            pos = matchPos + query.length
-            matchPos = lowerText.indexOf(query, pos)
-          }
-        }
-
-        // Process text nodes in reverse order to avoid invalidating positions
-        // But we need to assign IDs in forward order, so use a reverse counter
-        const totalMatchesInTurn = allMatches.length
-        let reverseCounter = totalMatchesInTurn - 1
-
-        for (let i = textNodes.length - 1; i >= 0; i--) {
-          const textNode = textNodes[i]
-          const text = textNode.textContent || ''
-          const lowerText = text.toLowerCase()
-
-          // Find matches in this node (in reverse order for DOM manipulation)
-          const nodeMatches: number[] = []
-          let pos = 0
-          let matchPos = lowerText.indexOf(query, pos)
-          while (matchPos !== -1) {
-            nodeMatches.push(matchPos)
-            pos = matchPos + query.length
-            matchPos = lowerText.indexOf(query, pos)
-          }
-
-          if (nodeMatches.length === 0) continue
-
-          // Process in reverse to maintain positions
-          let lastIndex = text.length
-          const fragments: (string | HTMLElement)[] = []
-
-          for (let j = nodeMatches.length - 1; j >= 0; j--) {
-            const matchStart = nodeMatches[j]
-            const matchEnd = matchStart + query.length
-
-            // Text after match
-            if (matchEnd < lastIndex) {
-              fragments.unshift(text.slice(matchEnd, lastIndex))
+          while ((pos = lowerText.indexOf(query, pos)) !== -1) {
+            try {
+              const range = new Range()
+              range.setStart(textNode, pos)
+              range.setEnd(textNode, pos + query.length)
+              allRanges.push(range)
+              rangeByGlobalIndex.set(globalIndex, range)
+              globalIndex++
+            } catch {
+              // Range creation can fail if node was removed during walk
             }
-
-            // Highlighted match with unique ID
-            const mark = document.createElement('mark')
-            const matchIdIndex = reverseCounter - (nodeMatches.length - 1 - j)
-            const markId = `${turnId}-match-${matchIdIndex}`
-            mark.id = markId
-            // All highlights start as passive (subtle 30% opacity yellow)
-            mark.className = 'search-highlight bg-yellow-300/30 rounded-[2px]'
-            mark.textContent = text.slice(matchStart, matchEnd)
-            fragments.unshift(mark)
-            createdMatchIds.push(markId)
-
-            lastIndex = matchStart
-          }
-
-          // Update reverse counter
-          reverseCounter -= nodeMatches.length
-
-          // Text before first match
-          if (lastIndex > 0) {
-            fragments.unshift(text.slice(0, lastIndex))
-          }
-
-          // Replace text node with fragments
-          if (fragments.length > 0 && textNode.parentNode) {
-            const parent = textNode.parentNode
-            fragments.forEach(frag => {
-              if (typeof frag === 'string') {
-                parent.insertBefore(document.createTextNode(frag), textNode)
-              } else {
-                parent.insertBefore(frag, textNode)
-              }
-            })
-            parent.removeChild(textNode)
+            pos += query.length
           }
         }
       })
-    }
 
-    // Retry logic: if no refs available yet, wait and try again
-    let attempts = 0
-    const maxAttempts = 5
-    let highlightTimeoutId: ReturnType<typeof setTimeout> | null = null
+      if (allRanges.length === 0) return
 
-    const tryHighlight = () => {
-      // If no turns to highlight, don't retry - there's nothing to wait for
-      if (matchingTurnIds.length === 0) {
-        return
+      try {
+        // Separate active match from passive matches
+        const activeRange = rangeByGlobalIndex.get(currentMatchIndex)
+        const passiveRanges = activeRange
+          ? allRanges.filter(r => r !== activeRange)
+          : allRanges
+
+        if (passiveRanges.length > 0) {
+          cssHighlights.set('search-passive', new Highlight(...passiveRanges))
+        }
+        if (activeRange) {
+          cssHighlights.set('search-active', new Highlight(activeRange))
+        }
+      } catch {
+        // Highlight API call failed — degrade gracefully to ring-only highlighting
       }
+    })
 
-      // Only count turns that are in refs AND not already highlighted
-      const unhighlightedMatchingInRefs = matchingTurnIds.filter(id =>
-        turnRefs.current.has(id) && !highlightedTurnIdsRef.current.has(id)
-      ).length
-      if (unhighlightedMatchingInRefs > 0) {
-        applyHighlights()
-        // Accumulate match IDs (for pagination - adds new matches to existing)
-        setActualMatchIds(prev => {
-          const merged = new Set(prev)
-          createdMatchIds.forEach(id => merged.add(id))
-          return merged
-        })
-      } else if (attempts < maxAttempts) {
-        // Refs not ready yet - retry with increasing delay
-        attempts++
-        highlightTimeoutId = setTimeout(tryHighlight, 100)
-      }
-    }
-
-    // Start with initial delay for DOM rendering
-    const timeoutId = setTimeout(tryHighlight, 50)
-
-    // Cleanup function - only clear timeouts, not highlights
-    // Highlights are cleared in the effect body when search/session changes (contextChanged)
-    return () => {
-      clearTimeout(timeoutId)
-      if (highlightTimeoutId) clearTimeout(highlightTimeoutId)
-    }
-  }, [searchQuery, isSearchActive, matchingTurnIds, session?.id, visibleTurnCount]) // Added visibleTurnCount to re-highlight after pagination
+    return () => cancelAnimationFrame(rafId)
+  }, [searchQuery, isSearchActive, matchingTurnIds, session?.id, visibleTurnCount, currentMatchIndex, cssHighlights])
 
   // Navigate to next match (no looping - stops at last match)
   const goToNextMatch = useCallback(() => {

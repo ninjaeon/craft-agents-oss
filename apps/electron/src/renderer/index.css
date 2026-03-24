@@ -5,10 +5,12 @@
 @source "../renderer/App.tsx";
 @source "../renderer/main.tsx";
 @source "../renderer/components/**/*.{ts,tsx,jsx}";
+@source "../renderer/config/**/*.{ts,tsx,jsx}";
 @source "../renderer/contexts/**/*.{ts,tsx,jsx}";
 @source "../renderer/hooks/**/*.{ts,tsx,jsx}";
 @source "../renderer/pages/**/*.{ts,tsx,jsx}";
 @source "../renderer/tabs/**/*.{ts,tsx,jsx}";
+@source "../renderer/utils/**/*.{ts,tsx,jsx}";
 @source "../renderer/playground/**/*.{ts,tsx,jsx}";
 @source "../../../../packages/ui/src/components/**/*.{ts,tsx,jsx}";
 @source "../../../../packages/ui/src/lib/**/*.{ts,tsx,jsx}";
@@ -1358,4 +1360,20 @@ html.dark[data-scenic] .fullscreen-overlay-background {
 [data-compact] .turn-action-btn {
   min-height: 31px;
   padding: 6px 8px;
+}
+
+/* ============================================================================
+ * CSS Custom Highlight API — search highlighting
+ * Uses non-destructive browser-native highlighting (no DOM mutation).
+ * Ranges are created/cleared in ChatDisplay.tsx via CSS.highlights.
+ * ============================================================================ */
+
+::highlight(search-passive) {
+  background-color: oklch(from var(--info) l c h / 0.2);
+  color: inherit;
+}
+
+::highlight(search-active) {
+  background-color: var(--info);
+  color: white;
 }

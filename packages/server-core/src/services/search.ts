@@ -223,10 +223,13 @@ export async function searchSessions(
 
     // Use regex pattern that:
     // 1. Only matches user/assistant message lines (skips huge tool_result lines)
-    // 2. Requires the query to appear somewhere in the line
+    // 2. Tolerates JSON key order differences in serialized message objects
+    // 3. Requires the query to appear somewhere in the line
     // This filters at ripgrep level, avoiding 70x more data being sent to Node.js
     const escapedQuery = escapeRegex(query);
-    args.push('-e', `^\\{"id":"[^"]*","type":"(user|assistant)".*${escapedQuery}`);
+    // Session JSONL lines use "type":"user" and "type":"assistant" (not "role")
+    // Use alternation to match the query anywhere on user/assistant lines regardless of key order
+    args.push('-e', `("type":"user".*${escapedQuery}|${escapedQuery}.*"type":"user"|"type":"assistant".*${escapedQuery}|${escapedQuery}.*"type":"assistant")`);
     args.push(sessionsDir);
 
     // Cancel previous search if still running (user typed new query)

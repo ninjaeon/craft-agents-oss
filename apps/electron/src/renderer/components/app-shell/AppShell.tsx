@@ -739,7 +739,12 @@ function AppShellContent({
 
   // Callback for immediate match info updates from ChatDisplay
   const handleChatMatchInfoChange = React.useCallback((info: { count: number; index: number }) => {
-    setChatMatchInfo(info)
+    setChatMatchInfo(prev => {
+      if (prev.count === info.count && prev.index === info.index) {
+        return prev
+      }
+      return info
+    })
   }, [])
 
   // Reset match info when search is deactivated

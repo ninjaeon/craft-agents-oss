@@ -2453,7 +2453,7 @@ export function ResponseCard({
               }),
             }}
           >
-            <div ref={contentLayerRef} className="relative">
+            <div ref={contentLayerRef} className="relative" data-search-root="response">
               <Markdown
                 mode="minimal"
                 onUrlClick={onOpenUrl}

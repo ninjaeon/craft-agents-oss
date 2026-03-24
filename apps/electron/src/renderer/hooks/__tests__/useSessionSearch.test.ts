@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
-import { computeCollapsedPagination } from '../useSessionSearch'
+import { computeCollapsedPagination, sessionMatchesCurrentFilter } from '../useSessionSearch'
 import type { SessionMeta } from '@/atoms/sessions'
+import { getSessionTitle } from '@/utils/session'
 
 function makeSession(id: string, opts: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -65,5 +66,28 @@ describe('computeCollapsedPagination', () => {
 
     expect(result.paginatedItems.map(s => s.id)).toEqual(['a', 'b'])
     expect(result.collapsedGroupsMeta).toEqual([])
+  })
+})
+
+describe('search-mode title/content behavior', () => {
+  it('keeps title-only substring matches when search mode is active with 2+ characters', () => {
+    const sessions = [
+      makeSession('alpha', { name: 'Alpha Session' }),
+      makeSession('beta', { name: 'Beta Session' }),
+    ]
+    const searchQuery = 'al'
+    const normalizedQuery = searchQuery.trim().toLowerCase()
+    const contentSearchResults = new Map<string, { matchCount: number; snippet: string }>()
+
+    const results = sessions
+      .filter(item => {
+        const title = getSessionTitle(item).toLowerCase()
+        const hasTitleMatch = title.includes(normalizedQuery)
+        const hasContentMatch = contentSearchResults.has(item.id)
+        return hasTitleMatch || hasContentMatch
+      })
+      .filter(item => sessionMatchesCurrentFilter(item, { kind: 'allSessions' }))
+
+    expect(results.map(item => item.id)).toEqual(['alpha'])
   })
 })
